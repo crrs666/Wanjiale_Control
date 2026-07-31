@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from ._entity import WanjialeEntity
 from .api import (
     WanjialeApi,
+    WanjialeBoiler,
     WanjialeDevice,
     WanjialeDisinfect,
     WanjialeStove,
@@ -38,6 +39,18 @@ async def async_setup_entry(
         if isinstance(dev, WanjialeWaterHeater):
             devices.append(WanjialePowerSwitch(dev, coordinator))
             devices.append(WanjialeBoostSwitch(dev, coordinator))
+    # 壁挂炉开关：主电源 / 即热 / 抑菌（供暖开关由 climate 实体控制）
+    for dev in api.devices:
+        if isinstance(dev, WanjialeBoiler):
+            devices.append(WanjialeBoilerSwitch(
+                dev, coordinator, "is_power_on", "set_power", "电源", "mdi:power",
+            ))
+            devices.append(WanjialeBoilerSwitch(
+                dev, coordinator, "is_instant_heat", "set_instant_heat", "即热", "mdi:flash",
+            ))
+            devices.append(WanjialeBoilerSwitch(
+                dev, coordinator, "is_antibacterial", "set_antibacterial", "抑菌", "mdi:bacteria",
+            ))
     async_add_entities(devices, True)
 
 
@@ -135,5 +148,52 @@ class WanjialeBoostSwitch(WanjialeEntity, SwitchEntity):
 
     def turn_off(self, **kwargs: Any) -> None:
         self._wh.set_boost(False)
+        self.schedule_update_ha_state()
+        self._request_refresh_soon()
+
+
+class WanjialeBoilerSwitch(WanjialeEntity, SwitchEntity):
+    """壁挂炉通用开关实体。
+
+    通过属性名 + setter 方法名参数化，复用于电源/即热/抑菌开关。
+      - state_attr: 读取状态的设备属性名（如 "is_power_on"）
+      - setter:     控制开关的设备方法名（如 "set_power"）
+    """
+
+    def __init__(
+        self,
+        device: WanjialeBoiler,
+        coordinator,
+        state_attr: str,
+        setter: str,
+        label: str,
+        icon: str,
+    ) -> None:
+        super().__init__(device, coordinator)
+        self._boiler = device
+        self._state_attr = state_attr
+        self._setter = setter
+        self._label = label
+        self._attr_icon = icon
+
+    @property
+    def name(self) -> str:
+        return self._label
+
+    @property
+    def unique_id(self) -> str:
+        return f"{self._device.unique_id()}-{self._label}"
+
+    @property
+    def is_on(self) -> bool:
+        return bool(getattr(self._boiler, self._state_attr, False))
+
+    def turn_on(self, **kwargs: Any) -> None:
+        getattr(self._boiler, self._setter)(True)
+        self.schedule_update_ha_state()
+        self._request_refresh_soon()
+
+    def turn_off(self, **kwargs: Any) -> None:
+        getattr(self._boiler, self._setter)(False)
         self.schedule_update_ha_state()
         self._request_refresh_soon()

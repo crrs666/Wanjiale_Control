@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from ._entity import WanjialeEntity
-from .api import WanjialeApi, WanjialeWaterHeater
+from .api import WanjialeApi, WanjialeBoiler, WanjialeWaterHeater
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,6 +45,12 @@ async def async_setup_entry(
         for dev in api.devices
         if isinstance(dev, WanjialeWaterHeater)
     ]
+    # 壁挂炉生活热水
+    devices.extend(
+        WanjialeBoilerWaterHeaterEntity(dev, coordinator)
+        for dev in api.devices
+        if isinstance(dev, WanjialeBoiler)
+    )
     _LOGGER.info("创建 %d 个热水器实体: %s", len(devices), [d.name for d in devices])
     async_add_entities(devices, True)
 
@@ -127,5 +133,79 @@ class WanjialeWaterHeaterEntity(WanjialeEntity, WaterHeaterEntity):
         if internal is None:
             return
         self._wh.set_mode(internal)
+        self.schedule_update_ha_state()
+        self._request_refresh_soon()
+
+
+class WanjialeBoilerWaterHeaterEntity(WanjialeEntity, WaterHeaterEntity):
+    """壁挂炉生活热水实体。
+
+    - 当前温度 = dvid 106
+    - 目标温度 = dvid 109
+    - 开关 = dvid 101（电源开关）
+    """
+
+    _attr_supported_features = (
+        WaterHeaterEntityFeature.TARGET_TEMPERATURE
+        | WaterHeaterEntityFeature.ON_OFF
+    )
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_target_temperature_step = 1
+    _attr_icon = "mdi:water-boiler"
+
+    def __init__(self, device: WanjialeBoiler, coordinator) -> None:
+        super().__init__(device, coordinator)
+        self._boiler: WanjialeBoiler = device
+
+    @property
+    def name(self) -> str:
+        return "生活热水"
+
+    @property
+    def unique_id(self) -> str:
+        return f"{self._device.unique_id()}-dhw"
+
+    @property
+    def min_temp(self) -> float:
+        return float(self._boiler.MIN_DHW_TEMP)
+
+    @property
+    def max_temp(self) -> float:
+        return float(self._boiler.MAX_DHW_TEMP)
+
+    @property
+    def is_on(self) -> Optional[bool]:
+        return self._boiler.is_power_on
+
+    @property
+    def current_temperature(self) -> Optional[float]:
+        return self._boiler.dhw_current_temp
+
+    @property
+    def target_temperature(self) -> Optional[float]:
+        return self._boiler.dhw_target_temp
+
+    @property
+    def state(self) -> Optional[str]:
+        """外显状态：壁挂炉热水无模式，显示电源开关状态。"""
+        if self._boiler.is_power_on is None:
+            return None
+        return "开" if self._boiler.is_power_on else "关"
+
+    def turn_on(self, **kwargs: Any) -> None:
+        self._boiler.set_power(True)
+        self.schedule_update_ha_state()
+        self._request_refresh_soon()
+
+    def turn_off(self, **kwargs: Any) -> None:
+        self._boiler.set_power(False)
+        self.schedule_update_ha_state()
+        self._request_refresh_soon()
+
+    def set_temperature(self, **kwargs: Any) -> None:
+        temp = kwargs.get("temperature")
+        if temp is None:
+            return
+        self._boiler.set_dhw_temperature(int(float(temp)))
         self.schedule_update_ha_state()
         self._request_refresh_soon()

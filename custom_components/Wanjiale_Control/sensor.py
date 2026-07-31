@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from ._entity import WanjialeEntity
-from .api import WanjialeApi, WanjialeDevice, WanjialeWaterHeater
+from .api import WanjialeApi, WanjialeBoiler, WanjialeDevice, WanjialeWaterHeater
 from .const import DOMAIN
 
 
@@ -34,6 +34,10 @@ async def async_setup_entry(
         if isinstance(dev, WanjialeWaterHeater):
             # 热水器单独添加当前温度 sensor
             entities.append(WanjialeTemperatureSensor(dev, coordinator))
+            continue
+        if isinstance(dev, WanjialeBoiler):
+            # 壁挂炉：用气量（温度已由 climate/water_heater 实体展示）
+            entities.append(WanjialeBoilerGasSensor(dev, coordinator))
             continue
         entities.append(WanjialeOnlineSensor(dev, coordinator))
 
@@ -82,3 +86,29 @@ class WanjialeTemperatureSensor(WanjialeEntity, SensorEntity):
             return self._device.current_temperature
         # 回退到 attributes 中的原始值
         return self._device.attributes.get("28")
+
+
+class WanjialeBoilerGasSensor(WanjialeEntity, SensorEntity):
+    """壁挂炉用气量传感器。
+
+    dvid 103，单位 1/256 m³，换算为 m³。
+    state_class=total_increasing（累计只增）。
+    """
+
+    _attr_device_class = SensorDeviceClass.GAS
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_native_unit_of_measurement = "m³"
+    _attr_icon = "mdi:gas-burner"
+
+    def __init__(self, device: WanjialeBoiler, coordinator) -> None:
+        super().__init__(device, coordinator)
+        self._boiler = device
+        self._attr_name = "用气量"
+
+    @property
+    def unique_id(self) -> str:
+        return f"{self._device.unique_id()}-gas"
+
+    @property
+    def native_value(self):
+        return self._boiler.gas_usage

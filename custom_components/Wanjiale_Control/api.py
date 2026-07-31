@@ -57,6 +57,12 @@ def _resolve_device_class(raw_device: Dict[str, Any]) -> Type["WanjialeDevice"]:
     for key in (t, model, product):
         if key and key in _DEVICE_TYPE_REGISTRY:
             return _DEVICE_TYPE_REGISTRY[key]
+
+    # 优先识别壁挂炉（避免被燃热/燃气关键词误判为热水器）
+    for token in ("壁挂炉", "boiler"):
+        if token in name or token in model:
+            return WanjialeBoiler
+
     for token in ("热水器", "water", "heater", "燃热", "燃气"):
         if token in name or token in model:
             return WanjialeWaterHeater
@@ -377,6 +383,174 @@ class WanjialeWaterHeater(WanjialeDevice):
             self.MODE_SUR: "SUR",
             self.MODE_KITCHEN: "厨房洗",
         }.get(m, "未知")
+
+
+# ======================================================================
+# 壁挂炉设备
+# ======================================================================
+@register_device_type("boiler")
+@register_device_type("壁挂炉")
+class WanjialeBoiler(WanjialeDevice):
+    """万家乐壁挂炉（采暖 + 生活热水）。
+
+    dvid 体系与热水器完全不同，控制方式为直接 dvid=value（无复合编码）。
+    基于 B6L 型号实测：
+      101 - 电源开关 (0/1)
+      103 - 用气量 (单位 1/256 m³)
+      106 - 当前生活热水水温
+      107 - 当前供暖水温
+      109 - 设定生活热水水温
+      110 - 设定供暖水温
+      147 - 即热功能开关 (0/1)
+      149 - 抑菌功能开关 (0/1)
+      150 - 供暖开关 (0/1)
+      254 - WiFi 信号强度 (dBm)
+    """
+
+    platform = "climate"
+    category_cn = "壁挂炉"
+
+    DVID_POWER = "101"
+    DVID_GAS_USAGE = "103"
+    DVID_DHW_CURRENT_TEMP = "106"
+    DVID_HEATING_CURRENT_TEMP = "107"
+    DVID_DHW_TARGET_TEMP = "109"
+    DVID_HEATING_TARGET_TEMP = "110"
+    DVID_INSTANT_HEAT = "147"
+    DVID_ANTIBACTERIAL = "149"
+    DVID_HEATING_POWER = "150"
+    DVID_RSSI = "254"
+
+    # 温度范围（B6L 实测，可后续按机型调整）
+    MIN_DHW_TEMP = 35
+    MAX_DHW_TEMP = 65
+    MIN_HEATING_TEMP = 30
+    MAX_HEATING_TEMP = 80
+
+    is_power_on: Optional[bool] = None
+    gas_usage: Optional[float] = None
+    dhw_current_temp: Optional[int] = None
+    heating_current_temp: Optional[int] = None
+    dhw_target_temp: Optional[int] = None
+    heating_target_temp: Optional[int] = None
+    is_instant_heat: Optional[bool] = None
+    is_antibacterial: Optional[bool] = None
+    is_heating_on: Optional[bool] = None
+    rssi: Optional[int] = None
+
+    _last_control_time: float = 0.0
+
+    def refresh(self) -> None:
+        super().refresh()
+
+        as_data = self.attributes.get("as", {})
+        if not isinstance(as_data, dict):
+            return
+
+        if self.DVID_POWER in as_data:
+            self.is_power_on = str(as_data[self.DVID_POWER]) == "1"
+
+        if self.DVID_GAS_USAGE in as_data:
+            try:
+                self.gas_usage = int(as_data[self.DVID_GAS_USAGE]) / 256.0
+            except (TypeError, ValueError):
+                self.gas_usage = None
+
+        if self.DVID_DHW_CURRENT_TEMP in as_data:
+            try:
+                self.dhw_current_temp = int(as_data[self.DVID_DHW_CURRENT_TEMP])
+            except (TypeError, ValueError):
+                self.dhw_current_temp = None
+
+        if self.DVID_HEATING_CURRENT_TEMP in as_data:
+            try:
+                self.heating_current_temp = int(as_data[self.DVID_HEATING_CURRENT_TEMP])
+            except (TypeError, ValueError):
+                self.heating_current_temp = None
+
+        if self.DVID_DHW_TARGET_TEMP in as_data:
+            try:
+                self.dhw_target_temp = int(as_data[self.DVID_DHW_TARGET_TEMP])
+            except (TypeError, ValueError):
+                self.dhw_target_temp = None
+
+        if self.DVID_HEATING_TARGET_TEMP in as_data:
+            try:
+                self.heating_target_temp = int(as_data[self.DVID_HEATING_TARGET_TEMP])
+            except (TypeError, ValueError):
+                self.heating_target_temp = None
+
+        if self.DVID_INSTANT_HEAT in as_data:
+            self.is_instant_heat = str(as_data[self.DVID_INSTANT_HEAT]) == "1"
+
+        if self.DVID_ANTIBACTERIAL in as_data:
+            self.is_antibacterial = str(as_data[self.DVID_ANTIBACTERIAL]) == "1"
+
+        if self.DVID_HEATING_POWER in as_data:
+            self.is_heating_on = str(as_data[self.DVID_HEATING_POWER]) == "1"
+
+        if self.DVID_RSSI in as_data:
+            try:
+                self.rssi = int(as_data[self.DVID_RSSI])
+            except (TypeError, ValueError):
+                self.rssi = None
+
+    # ------------------------------------------------------------------
+    # 控制方法（直接 dvid=value，无复合编码）
+    # ------------------------------------------------------------------
+    def set_power(self, on: bool) -> Dict[str, Any]:
+        result = self._send_opt(self.DVID_POWER, 1 if on else 0)
+        if isinstance(result, dict) and not result.get("error"):
+            self.is_power_on = on
+            self._last_control_time = time.time()
+            self._last_seen_online = time.time()
+        return result
+
+    def set_heating_power(self, on: bool) -> Dict[str, Any]:
+        result = self._send_opt(self.DVID_HEATING_POWER, 1 if on else 0)
+        if isinstance(result, dict) and not result.get("error"):
+            self.is_heating_on = on
+            self._last_control_time = time.time()
+            self._last_seen_online = time.time()
+        return result
+
+    def set_heating_temperature(self, temperature: int) -> Dict[str, Any]:
+        temp = max(self.MIN_HEATING_TEMP, min(self.MAX_HEATING_TEMP, temperature))
+        result = self._send_opt(self.DVID_HEATING_TARGET_TEMP, temp)
+        if isinstance(result, dict) and not result.get("error"):
+            self.heating_target_temp = temp
+            self._last_control_time = time.time()
+            self._last_seen_online = time.time()
+        return result
+
+    def set_dhw_temperature(self, temperature: int) -> Dict[str, Any]:
+        temp = max(self.MIN_DHW_TEMP, min(self.MAX_DHW_TEMP, temperature))
+        result = self._send_opt(self.DVID_DHW_TARGET_TEMP, temp)
+        if isinstance(result, dict) and not result.get("error"):
+            self.dhw_target_temp = temp
+            self._last_control_time = time.time()
+            self._last_seen_online = time.time()
+        return result
+
+    def set_instant_heat(self, on: bool) -> Dict[str, Any]:
+        result = self._send_opt(self.DVID_INSTANT_HEAT, 1 if on else 0)
+        if isinstance(result, dict) and not result.get("error"):
+            self.is_instant_heat = on
+            self._last_control_time = time.time()
+        return result
+
+    def set_antibacterial(self, on: bool) -> Dict[str, Any]:
+        result = self._send_opt(self.DVID_ANTIBACTERIAL, 1 if on else 0)
+        if isinstance(result, dict) and not result.get("error"):
+            self.is_antibacterial = on
+            self._last_control_time = time.time()
+        return result
+
+    def turn_on(self) -> Dict[str, Any]:
+        return self.set_power(True)
+
+    def turn_off(self) -> Dict[str, Any]:
+        return self.set_power(False)
 
 
 # ======================================================================

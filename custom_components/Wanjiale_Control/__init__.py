@@ -21,7 +21,7 @@ from .protocol import WanjialeProtocol
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ("water_heater", "sensor", "switch")
+PLATFORMS = ("water_heater", "climate", "sensor", "switch")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
